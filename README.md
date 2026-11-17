@@ -8,7 +8,7 @@
 - **No public SSH, tunnels only:** the VM has no public IP. Admin shell goes through the Google IAP tunnel (the only ingress rule: tcp:22 from IAP's range); public web traffic goes through an outbound Cloudflare quick tunnel; outbound internet via Cloud NAT. The project's default world-open SSH/RDP rules are removed.
 - **Secure by default:** the Ghost owner account is claimed automatically seconds after Ghost starts (the setup page is not left open on the random tunnel URL); DB and admin passwords are generated on the VM and are only readable over IAP. No mail is configured, so Ghost's new-device email check for staff login is turned off.
 - **How we checked:** `loop.sh` runs destroy → deploy from zero → deploy again → `verify.sh` → reboot check; every DoD item below is a scripted PASS/FAIL. Final zero → success run on the default `e2-small`: **all PASS** (see [Verification](#verification)).
-- **Calibration:** machine size is a parameter (`MACHINE_TYPE`, default `e2-small`, 2 GB). Measured on 4 tiers: the stack uses < 1 GB RAM; `e2-small` passes everything with no swap; `e2-micro` (1 GB) works but is ~10× slower. Full table and decision follow in a separate calibration PR.
+- **Calibration:** machine size is a parameter (`MACHINE_TYPE`, default `e2-small`, 2 GB). Measured on 4 tiers: the stack uses < 1 GB RAM; `e2-small` passes everything with no swap; `e2-micro` (1 GB) works but is ~10× slower. Full table and decision in [Calibration](#calibration).
 - **Torn down:** after the final run, all created resources were destroyed (`verify.sh --destroyed` PASS).
 - **Infra cost of this work:** ≈ **$0.15–0.25** (estimate from ~1.5 VM-hours across 4 machine sizes, ~1.5 disk-hours, Cloud NAT gateway + ~2 GB NAT processing for apt/image pulls; IAP and the Cloudflare quick tunnel are free). Exact figure appears in GCP billing after ~24 h; a €10 project budget alert was set as a guard.
 
@@ -77,7 +77,7 @@ Each item is one PASS/FAIL assertion in `verify.sh`, proven by a **zero → succ
 - [x] C5. `cloudflared` (outbound tunnel) is running — B1 proves it serves Ghost; egress works via Cloud NAT.
 
 ### Also required (checked once, not in the loop)
-- [x] **Calibration measured** — 4 tiers (`e2-standard-2`, `e2-medium`, `e2-small`, `e2-micro`): memory idle/after load, swap, OOM kills, 300-request load test. Default `e2-small` confirmed; table + decision write-up in the follow-up calibration PR.
+- [x] **Calibration measured** — 4 tiers (`e2-standard-2`, `e2-medium`, `e2-small`, `e2-micro`): memory idle/after load, swap, OOM kills, 300-request load test. Default `e2-small` confirmed (see [Calibration](#calibration)).
 - [x] **No secrets in the public repo** — passwords generated on the VM, `.gitignore` for secret files, tunnel URLs redacted in logs; manual `gitleaks git .` scan before pushes (no credentials found; PR is squash-merged so early commits don't land in `main`).
 
 ## Verification
@@ -106,19 +106,38 @@ verify.sh --reboot (B3)            PASS   115s
 OVERALL: PASS
 ```
 
-Calibration snapshot (`calibrate.sh`, 300 requests, concurrency 10, through the tunnel):
-
-| tier | RAM | mem used after load | swap | load ok / fail | p50 / p95 | OOM |
-|---|---|---|---|---|---|---|
-| e2-standard-2 | 8 GB | 952 MB | 0 | 300 / 0 | 0.29 / 0.56 s | 0 |
-| e2-medium | 4 GB | 911 MB | 0 | 300 / 0 | 0.29 / 0.52 s | 0 |
-| **e2-small** (default) | 2 GB | 820 MB | 0 | 300 / 0 | 0.23 / 1.46 s | 0 |
-| e2-micro | 1 GB | 673 MB | 140 MB | 300 / 0 | 2.39 / 4.24 s | 0 |
+Machine-size measurements: see [Calibration](#calibration).
 
 Issues found and fixed along the way:
 - Debian 12 image `v20261117` kernel crashed (ext4 oops) during first boot → switched to Debian 13.
 - Ghost's first-run setup page would be public on the tunnel URL → owner account auto-created on deploy.
 - Checks that could pass when `gcloud` itself failed → now fail loudly.
+
+## Calibration
+
+**Decision: default `MACHINE_TYPE=e2-small` (2 vCPU shared, 2 GB).** Smallest tier that passes every check with headroom, no swap and no OOM kills. Use `e2-medium` if the blog expects sustained traffic (tighter p95); `e2-micro` is not recommended.
+
+Method (`calibrate.sh`): the same VM is stopped, resized, and started on each tier, then measured: time to `ready`, `verify.sh`, `free -m` idle and after load, swap, `docker stats` RSS, `dmesg` OOM kills, and a load test of 300 requests at concurrency 10 through the public tunnel.
+
+| tier | vCPU / RAM | start → ready | verify | mem idle / after load | swap | Ghost / MySQL RSS | load ok / fail | p50 / p95 | OOM |
+|---|---|---|---|---|---|---|---|---|---|
+| e2-standard-2 | 2 / 8 GB | 76 s | PASS | 881 / 952 MB | 0 | 190 / 206 MiB | 300 / 0 | 0.29 / 0.56 s | 0 |
+| e2-medium | 2 / 4 GB | 81 s | PASS | 862 / 911 MB | 0 | 185 / 205 MiB | 300 / 0 | 0.29 / 0.52 s | 0 |
+| **e2-small** | 2 / 2 GB | 72 s | PASS | 761 / 820 MB | 0 | 177 / 203 MiB | 300 / 0 | 0.23 / 1.46 s | 0 |
+| e2-micro | 2 / 1 GB | 213 s | PASS | 620 / 673 MB | 140 MB | 194 / 83 MiB | 300 / 0 | 2.39 / 4.24 s | 0 |
+
+Boot phases on restart (seconds, from the VM's `ghost/timings`):
+
+| tier | docker | pull | tunnel | Ghost start | total |
+|---|---|---|---|---|---|
+| e2-standard-2 / e2-medium / e2-small | 3–4 | 1–2 | 10 | 11 | 27–29 |
+| e2-micro | 9 | 18 | 31 | 100 | 165 |
+
+Findings:
+- **Memory is not the constraint:** the whole stack (Ghost + MySQL tuned for small RAM + cloudflared + OS) uses ~0.8–0.95 GB under load. 2 GB leaves > 1 GB headroom.
+- **CPU bursts are:** `e2-small`'s p95 rises to 1.46 s (shared-core burst), still 0 failures. `e2-micro` swaps (MySQL squeezed to 83 MiB), Ghost takes 100 s to start, and median latency is ~10× higher.
+- **First deploy from zero is slower than a restart:** on `e2-small` the one-time MySQL initialisation took ~107 s (final run: deploy from zero 342 s in total).
+- Limits of this calibration: a single short load test through a quick tunnel (which itself caps at 200 in-flight requests); no long soak test, no write-heavy load.
 
 ## Time tracking
 
