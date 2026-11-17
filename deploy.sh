@@ -126,7 +126,7 @@ echo
 echo "Ghost:  $(redact_url "$url")   (full URL: gcloud compute instances get-guest-attributes ${VM} --zone ${ZONE} --project ${PROJECT} --query-path=ghost/url)"
 echo "SSH:    $(iap_ssh_cmd)"
 echo "Admin login (created by the VM, never logged):"
-echo "  gcloud compute ssh ${VM} --zone ${ZONE} --tunnel-through-iap --command 'sudo cat /opt/ghost/admin.txt'"
+echo "  $(iap_ssh_cmd) --command 'sudo cat /opt/ghost/admin.txt'"
 echo "Note: quick-tunnel URL is random and changes whenever the VM reboots."
 if [[ -t 1 ]]; then
   echo
