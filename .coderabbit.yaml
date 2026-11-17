@@ -1,0 +1,5 @@
+# CodeRabbit is part of the author's default harness but not requested for this task.
+# Disable automatic reviews in this repo.
+reviews:
+  auto_review:
+    enabled: false

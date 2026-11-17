@@ -1,0 +1,13 @@
+# Never commit secrets — this repo is public
+.env
+.env.*
+*.pem
+*.key
+*credentials*.json
+*service-account*.json
+*.tfstate
+*.tfstate.*
+.terraform/
+secrets/
+.DS_Store
+logs/
