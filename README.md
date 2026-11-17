@@ -14,7 +14,7 @@
 
 1. **One-click script** — a single command provisions everything end-to-end, no manual console steps; re-runnable (idempotent) with a matching teardown.
 2. **Ghost blog platform** — a working production Ghost (official image + MySQL 8), persistent data, reachable at a URL.
-3. **At a cloud provider** — a real cloud VM provisioned as code (provider: **GCP**, project `ghost-deploy-test-514921`).
+3. **At a cloud provider** — a real cloud VM provisioned as code (provider: **GCP**).
 4. **No public SSH access** — port 22 is not exposed to the internet; no inbound SSH rule in the firewall/security group.
 5. **Only through tunnels** — all access (admin shell and web traffic) goes over an outbound-initiated tunnel; zero inbound ports open.
 
