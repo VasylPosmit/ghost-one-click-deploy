@@ -1,0 +1,9 @@
+# Default rules + one false positive: Anthropic API beta-header names inside
+# ai-conversations/ transcripts ("oauth-2025-04-20","interleaved-thinking-...").
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Claude Code transcript beta-header names"
+regexTarget = "match"
+regexes = ['''oauth-2025-04-20","interleaved-thinking''']

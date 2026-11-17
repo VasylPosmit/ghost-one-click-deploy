@@ -7,8 +7,10 @@
 - **What it does:** `./deploy.sh` deploys a production Ghost blog (Ghost 6 + MySQL 8, Docker Compose) on a GCP VM in one command, with **nothing reachable directly from the internet**.
 - **No public SSH, tunnels only:** the VM has no public IP. Admin shell goes through the Google IAP tunnel (the only ingress rule: tcp:22 from IAP's range); public web traffic goes through an outbound Cloudflare quick tunnel; outbound internet via Cloud NAT. The project's default world-open SSH/RDP rules are removed.
 - **Secure by default:** the Ghost owner account is claimed automatically seconds after Ghost starts (the setup page is not left open on the random tunnel URL); DB and admin passwords are generated on the VM and are only readable over IAP. No mail is configured, so Ghost's new-device email check for staff login is turned off.
-- **How we checked:** `loop.sh` runs destroy → deploy from zero → deploy again → `verify.sh` → reboot check; every DoD item below is a scripted PASS/FAIL. Result: **all PASS** (see [Verification](#verification)).
-- **Calibration:** machine size is a parameter (`MACHINE_TYPE`, default `e2-small`, 2 GB). Measured: the whole stack uses < 1 GB RAM under load. Tier-by-tier results land in a separate calibration PR.
+- **How we checked:** `loop.sh` runs destroy → deploy from zero → deploy again → `verify.sh` → reboot check; every DoD item below is a scripted PASS/FAIL. Final zero → success run on the default `e2-small`: **all PASS** (see [Verification](#verification)).
+- **Calibration:** machine size is a parameter (`MACHINE_TYPE`, default `e2-small`, 2 GB). Measured on 4 tiers: the stack uses < 1 GB RAM; `e2-small` passes everything with no swap; `e2-micro` (1 GB) works but is ~10× slower. Full table and decision follow in a separate calibration PR.
+- **Torn down:** after the final run, all created resources were destroyed (`verify.sh --destroyed` PASS).
+- **Infra cost of this work:** ≈ **$0.15–0.25** (estimate from ~1.5 VM-hours across 4 machine sizes, ~1.5 disk-hours, Cloud NAT gateway + ~2 GB NAT processing for apt/image pulls; IAP and the Cloudflare quick tunnel are free). Exact figure appears in GCP billing after ~24 h; a €10 project budget alert was set as a guard.
 
 ## Usage
 
@@ -75,7 +77,7 @@ Each item is one PASS/FAIL assertion in `verify.sh`, proven by a **zero → succ
 - [x] C5. `cloudflared` (outbound tunnel) is running — B1 proves it serves Ghost; egress works via Cloud NAT.
 
 ### Also required (checked once, not in the loop)
-- [ ] **Calibration done** — machine size chosen from measurements, not guessed (separate calibration PR).
+- [x] **Calibration measured** — 4 tiers (`e2-standard-2`, `e2-medium`, `e2-small`, `e2-micro`): memory idle/after load, swap, OOM kills, 300-request load test. Default `e2-small` confirmed; table + decision write-up in the follow-up calibration PR.
 - [x] **No secrets in the public repo** — passwords generated on the VM, `.gitignore` for secret files, tunnel URLs redacted in logs; manual `gitleaks git .` scan before pushes (no credentials found; PR is squash-merged so early commits don't land in `main`).
 
 ## Verification
@@ -92,7 +94,26 @@ verify.sh --reboot (B3)            PASS   129s
 OVERALL: PASS
 ```
 
-Final zero → success run (default `e2-small`): _pending — summary pasted here when done._
+**Final zero → success run** on 2026-11-17 (default `MACHINE_TYPE=e2-small`, separate isolated stack), `loop.sh` summary:
+
+```text
+destroy.sh                         PASS   6s
+verify --destroyed (A3)            PASS   11s
+deploy.sh #1 (A1, from zero)       PASS   342s
+deploy.sh #2 (A2, idempotent)      PASS   27s
+verify.sh (A1 A2 B1 B2 C1-C5)      PASS   21s
+verify.sh --reboot (B3)            PASS   115s
+OVERALL: PASS
+```
+
+Calibration snapshot (`calibrate.sh`, 300 requests, concurrency 10, through the tunnel):
+
+| tier | RAM | mem used after load | swap | load ok / fail | p50 / p95 | OOM |
+|---|---|---|---|---|---|---|
+| e2-standard-2 | 8 GB | 952 MB | 0 | 300 / 0 | 0.29 / 0.56 s | 0 |
+| e2-medium | 4 GB | 911 MB | 0 | 300 / 0 | 0.29 / 0.52 s | 0 |
+| **e2-small** (default) | 2 GB | 820 MB | 0 | 300 / 0 | 0.23 / 1.46 s | 0 |
+| e2-micro | 1 GB | 673 MB | 140 MB | 300 / 0 | 2.39 / 4.24 s | 0 |
 
 Issues found and fixed along the way:
 - Debian 12 image `v20261117` kernel crashed (ext4 oops) during first boot → switched to Debian 13.
@@ -105,8 +126,8 @@ Issues found and fixed along the way:
 |---|---|
 | Start | 2026-11-17 16:58 (WET) |
 | Target | ~1 h |
-| End | _HH:MM — filled at finish_ |
-| Total | _—_ |
+| End | 2026-11-17 17:55 (WET) — final run validated |
+| Total | 57 min |
 
 ## AI usage
 
