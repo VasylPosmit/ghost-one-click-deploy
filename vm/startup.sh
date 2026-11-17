@@ -27,6 +27,18 @@ meta_put() { # meta_put <key> <value>
 meta_del() {
   curl -fsS -X DELETE -H "Metadata-Flavor: Google" "${MD}/$1" >/dev/null 2>&1 || true
 }
+# Phase tracking: each phase is published as ghost/status; time spent per phase is
+# accumulated into ghost/timings ("phase=secs,...") and published just before ready.
+PHASE=""; PHASE_T0=$SECONDS; TIMINGS=""
+close_phase() {
+  if [[ -n "$PHASE" ]]; then TIMINGS+="${TIMINGS:+,}${PHASE}=$((SECONDS - PHASE_T0))"; fi
+  PHASE=""
+}
+phase() { # phase <name>
+  close_phase
+  PHASE="$1"; PHASE_T0=$SECONDS; STEP="$1"
+  log "phase: $1"; meta_put status "$1"
+}
 on_err() { local rc=$?; log "FAILED at step '${STEP}' (rc=${rc})"; meta_put status "error:${STEP}"; exit "$rc"; }
 trap on_err ERR
 
@@ -42,10 +54,11 @@ retry() { # retry <attempts> <cmd...>
 log "=== ghost startup begin ==="
 # Clear stale values from the previous boot so consumers wait for fresh ones.
 meta_del url
-meta_put status "starting"
+meta_del timings
+phase starting
 
 # --- swap ---------------------------------------------------------------
-STEP="swap"
+phase swap
 if [[ ! -f /swapfile ]]; then
   log "creating 1G swapfile"
   fallocate -l 1G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
@@ -56,6 +69,7 @@ grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fs
 swapon --show=NAME --noheadings | grep -qx /swapfile || swapon /swapfile
 
 # --- docker -------------------------------------------------------------
+phase docker-install
 STEP="wait-egress"
 # Cloud NAT / DNS can take a moment to be usable right after boot.
 for i in $(seq 1 30); do
@@ -172,13 +186,17 @@ chmod 600 docker-compose.yml
 docker compose config -q
 
 # --- bring up -----------------------------------------------------------
-STEP="pull-images"
-retry 6 docker compose pull -q
+phase pulling
+# `docker compose pull` fetches images in parallel. cloudflared is tiny, so it is pulled
+# first (foreground) and the tunnel starts while mysql+ghost are still pulling in the
+# background; mysql is started by that background job as soon as its image is present.
+( retry 6 docker compose pull -q mysql ghost && docker compose up -d mysql ) &
+BG_PID=$!
+STEP="pull-cloudflared"
+retry 6 docker compose pull -q cloudflared
 
-STEP="mysql-up"
-docker compose up -d mysql
+phase tunnel
 # fresh cloudflared instance every boot => clean logs, exactly one current URL
-STEP="tunnel-up"
 URL=""
 for attempt in 1 2 3 4 5; do
   docker compose up -d --force-recreate cloudflared
@@ -201,7 +219,16 @@ STEP="write-url"
   mv .env.tmp .env )
 chmod 600 .env
 
-STEP="ghost-up"
+phase db-starting
+wait "$BG_PID"   # background pull(mysql, ghost) + mysql start
+dbok=""
+for _ in $(seq 1 60); do
+  [[ "$(docker inspect -f '{{.State.Health.Status}}' mysql 2>/dev/null || true)" == "healthy" ]] && { dbok=1; break; }
+  sleep 5
+done
+[[ -n "$dbok" ]] || { log "mysql did not become healthy"; false; }
+
+phase ghost-starting
 docker compose up -d ghost   # recreates automatically when GHOST_URL changed
 
 STEP="ghost-health"
@@ -213,6 +240,7 @@ done
 [[ -n "$healthy" ]] || { log "ghost did not become healthy"; false; }
 
 # --- wait until the public tunnel really serves Ghost (200/302) --------------
+phase setup
 STEP="tunnel-reachable"
 code=""
 for _ in $(seq 1 60); do
@@ -264,6 +292,8 @@ else
 fi
 
 STEP="publish"
+close_phase
+meta_put timings "${TIMINGS},total=${SECONDS}"
 meta_put url "$URL"
-meta_put status "ready"
+phase ready
 log "=== ghost startup done: ready ==="

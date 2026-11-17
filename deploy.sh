@@ -109,17 +109,8 @@ fi
 # 7. Wait for Ghost ----------------------------------------------------------
 log "7/7 waiting for Ghost (timeout ${WAIT_TIMEOUT}s)"
 deadline=$((SECONDS + WAIT_TIMEOUT))
-url=""
-while (( SECONDS < deadline )); do
-  st="$(guest_attr status)"
-  case "$st" in
-    error:*) die "VM reported ${st}. Debug: $(iap_ssh_cmd) --command 'sudo tail -n 80 /var/log/ghost-startup.log'" ;;
-    ready)   url="$(guest_attr url)"; [[ -n "$url" ]] && break ;;
-  esac
-  log "  ... VM status: ${st:-<not reported yet>}"
-  sleep 15
-done
-[[ -n "$url" ]] || die "timed out waiting for guest attribute ghost/url. Debug: $(iap_ssh_cmd) --command 'sudo tail -n 80 /var/log/ghost-startup.log'"
+wait_ready || die "VM did not become ready (see messages above)"
+url="$WAIT_URL"
 log "  tunnel URL published: $(redact_url "$url")"
 
 while (( SECONDS < deadline )); do

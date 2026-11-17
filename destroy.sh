@@ -23,14 +23,26 @@ del_if_exists() { # del <label> <describe-cmd...> -- <delete-cmd...>
   fi
 }
 
-del_if_exists "VM ${VM}" gcloud compute instances describe "$VM" --zone "$ZONE" --project "$PROJECT" -- \
+# Independent resources are deleted concurrently (background jobs, all waited for; any
+# real failure still fails the script). Deleting the router also removes its Cloud NAT.
+# Dependency order is kept: VM gone before subnet, subnet gone before VPC.
+pids=()
+del_bg() { del_if_exists "$@" & pids+=("$!"); }
+wait_all() { # wait for every background delete, then fail if any failed
+  local p bad=0
+  for p in "${pids[@]}"; do wait "$p" || bad=1; done
+  pids=()
+  (( bad == 0 )) || die "$1: one or more deletes failed (see errors above)"
+}
+
+del_bg "VM ${VM}" gcloud compute instances describe "$VM" --zone "$ZONE" --project "$PROJECT" -- \
   gcc instances delete "$VM" --zone "$ZONE" --delete-disks=all
-del_if_exists "firewall ${FW_IAP}" gcloud compute firewall-rules describe "$FW_IAP" --project "$PROJECT" -- \
+del_bg "firewall ${FW_IAP}" gcloud compute firewall-rules describe "$FW_IAP" --project "$PROJECT" -- \
   gcc firewall-rules delete "$FW_IAP"
-del_if_exists "NAT ${NAT}" gcloud compute routers nats describe "$NAT" --router "$ROUTER" --region "$REGION" --project "$PROJECT" -- \
-  gcc routers nats delete "$NAT" --router "$ROUTER" --region "$REGION"
-del_if_exists "router ${ROUTER}" gcloud compute routers describe "$ROUTER" --region "$REGION" --project "$PROJECT" -- \
+del_bg "router ${ROUTER} (and NAT ${NAT})" gcloud compute routers describe "$ROUTER" --region "$REGION" --project "$PROJECT" -- \
   gcc routers delete "$ROUTER" --region "$REGION"
+wait_all "VM/firewall/router"
+
 del_if_exists "subnet ${SUBNET}" gcloud compute networks subnets describe "$SUBNET" --region "$REGION" --project "$PROJECT" -- \
   gcc networks subnets delete "$SUBNET" --region "$REGION"
 del_if_exists "VPC ${VPC}" gcloud compute networks describe "$VPC" --project "$PROJECT" -- \

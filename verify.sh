@@ -96,15 +96,10 @@ rc_check() { # rc_check <id> <desc> <rc-or-empty>   (values handed in by loop.sh
 reboot_flow() {
   local prev; prev="$(guest_attr url)"
   log "rebooting ${VM} from inside via IAP ssh (previous url: $(redact_url "${prev:-none}"))"
+  serial_baseline   # ignore console output from before the reboot
   vm_ssh 'sudo systemctl reboot' || true   # ssh drops while the VM goes down; non-zero is expected
   sleep 20
-  local deadline=$((SECONDS + WAIT_TIMEOUT)) st u
-  while (( SECONDS < deadline )); do
-    st="$(guest_attr status)"; u="$(guest_attr url)"
-    if [[ "$st" == "ready" && -n "$u" && "$u" != "$prev" ]]; then log "new url published after reboot"; return 0; fi
-    if [[ "$st" == error:* ]]; then log "VM reported $st"; return 1; fi
-    log "  ... waiting (status=${st:-?})"; sleep 15
-  done
+  wait_ready "$prev" && { log "new url published after reboot"; return 0; }
   return 1
 }
 

@@ -146,3 +146,67 @@ iap_ssh_cmd() {
 SSH_OPTS=(--zone "$ZONE" --project "$PROJECT" --tunnel-through-iap --quiet --strict-host-key-checking=no)
 SSH_ERR="${LIB_DIR}/logs/ssh-$(date -u +%Y%m%dT%H%M%SZ).err"
 vm_ssh() { mkdir -p "${LIB_DIR}/logs"; gcloud compute ssh "$VM" "${SSH_OPTS[@]}" --command "$1" 2>>"$SSH_ERR"; }
+
+# ---- fail-fast wait for the VM -------------------------------------------------
+# Serial console tail: SERIAL_OFF is the byte offset already seen, so each read only
+# fetches new output. gcloud prints the next offset on stderr ("--start=NNN").
+SERIAL_OFF=""
+SERIAL_OUT=""
+serial_fetch() { # sets SERIAL_OUT (new output) and advances SERIAL_OFF
+  local errf n
+  errf="$(mktemp)"
+  SERIAL_OUT="$(gcloud compute instances get-serial-port-output "$VM" --zone "$ZONE" --project "$PROJECT" \
+    --start "${SERIAL_OFF:-0}" 2>"$errf" || true)"
+  n="$(sed -n 's/.*--start=\([0-9][0-9]*\).*/\1/p' "$errf" | tail -n1)"
+  if [[ -n "$n" ]]; then SERIAL_OFF="$n"; fi
+  rm -f "$errf"
+}
+# Skip output that predates this wait (e.g. a panic from a previous boot).
+serial_baseline() { SERIAL_OFF=0; serial_fetch; SERIAL_OFF="${SERIAL_OFF:-0}"; }
+# Return 1 (printing the lines) if new serial output shows a kernel panic/oops/BUG.
+serial_check() {
+  local hits
+  serial_fetch
+  hits="$(grep -E 'Kernel panic|Oops:|BUG: ' <<<"$SERIAL_OUT" | head -n 10 || true)"
+  [[ -z "$hits" ]] && return 0
+  log "kernel fault on the serial console:" >&2
+  printf '%s\n' "$hits" >&2
+  return 1
+}
+
+# wait_ready [prev_url]: poll until ghost/status=ready and ghost/url is set (and differs
+# from prev_url, if given). Sets WAIT_URL. Returns 1 (message on stderr) when the VM
+# reports error:*, the serial console shows a kernel fault, or WAIT_TIMEOUT elapses.
+# Prints every status transition with a timestamp and seconds since the wait started.
+WAIT_URL=""
+wait_ready() {
+  local prev="${1:-}" t0=$SECONDS st last="" u n=0 tm
+  local deadline=$((SECONDS + WAIT_TIMEOUT))
+  WAIT_URL=""
+  [[ -n "$SERIAL_OFF" ]] || serial_baseline
+  while (( SECONDS < deadline )); do
+    n=$((n + 1))
+    st="$(guest_attr status)"
+    if [[ "$st" != "$last" ]]; then
+      log "  VM status: ${last:-<none>} -> ${st:-<not reported yet>} (+$((SECONDS - t0))s)"
+      last="$st"
+    fi
+    case "$st" in
+      error:*)
+        log "VM reported ${st}. Debug: $(iap_ssh_cmd) --command 'sudo tail -n 80 /var/log/ghost-startup.log'" >&2
+        return 1 ;;
+      ready)
+        u="$(guest_attr url)"
+        if [[ -n "$u" && "$u" != "$prev" ]]; then
+          WAIT_URL="$u"
+          tm="$(guest_attr timings)"
+          [[ -z "$tm" ]] || log "  VM phase timings (s): ${tm}"
+          return 0
+        fi ;;
+    esac
+    if (( n % 3 == 0 )); then serial_check || return 1; fi
+    sleep 5
+  done
+  log "timed out after ${WAIT_TIMEOUT}s waiting for ghost/status=ready (last status: ${last:-<none>}). Debug: $(iap_ssh_cmd) --command 'sudo tail -n 80 /var/log/ghost-startup.log'" >&2
+  return 1
+}
